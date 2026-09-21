@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "cgranier.capture",
+  "name": "Capture Inbox",
+  "version": "0.1.0",
+  "author": "Carlos Granier",
+  "license": "MIT",
+  "description": "A quiet inbox for the mnotes-capture CLI: what you captured, what is still waiting to be sent, and a box for a quick note.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Capture Inbox",
+    "description": "Shows captures waiting for the webhook to come back and sends them when it does; lists recent captures; takes a quick note.",
+    "category": "Productivity",
+    "aliases": ["capture", "mnotes", "inbox"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "command": "mnotes-capture",
+      "autoRetry": true,
+      "historyCount": 12
+    },
+    "schema": [
+      { "key": "command", "type": "string", "label": "Capture command", "defaultValue": "mnotes-capture", "description": "The CLI that owns the queue and the journal. The plugin never contacts a webhook itself." },
+      { "key": "autoRetry", "type": "boolean", "label": "Send waiting captures automatically", "defaultValue": true, "description": "While something is waiting, check once a minute whether the webhook answers, and send the queue when it does." },
+      { "key": "historyCount", "type": "integer", "label": "Recent captures shown", "min": 3, "max": 40, "step": 1, "defaultValue": 12 }
+    ]
+  }
+}
