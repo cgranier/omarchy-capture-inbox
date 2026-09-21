@@ -200,8 +200,12 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             enabled: !inbox.busy
-            onAccepted: if (inbox.quickNote(text)) { text = ""; keyCatcher.forceActiveFocus() }
-            Keys.onEscapePressed: { text = ""; keyCatcher.forceActiveFocus() }
+            // Enter belongs to the note while the field has focus. Left to
+            // travel up, it would also activate the row under the cursor.
+            function submit() { if (inbox.quickNote(text)) { text = ""; keyCatcher.forceActiveFocus() } }
+            Keys.onReturnPressed: function(event) { submit(); event.accepted = true }
+            Keys.onEnterPressed: function(event) { submit(); event.accepted = true }
+            Keys.onEscapePressed: function(event) { text = ""; keyCatcher.forceActiveFocus(); event.accepted = true }
           }
 
           Column {
