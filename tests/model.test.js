@@ -43,7 +43,7 @@ test("counts, bar label, and summary", () => {
   assert.strictEqual(M.barLabel(c, false), M.GLYPHS.waiting + " 3")
   assert.strictEqual(M.barLabel(c, true), M.GLYPHS.inbox)
   assert.strictEqual(M.barLabel({ waiting: 0, refused: 0 }, false), M.GLYPHS.inbox)
-  assert.strictEqual(M.summaryText(c, false, true), "2 waiting · 1 refused · mNOTES unreachable")
+  assert.strictEqual(M.summaryText(c, false, true), "2 waiting · 1 refused · not reachable")
   assert.strictEqual(M.summaryText(c, true, true), "2 waiting · 1 refused")
   assert.strictEqual(M.summaryText({ waiting: 0, refused: 1 }, false, true), "1 refused")
   assert.strictEqual(M.summaryText({ waiting: 0, refused: 0 }, true, true), "Everything sent")
@@ -51,9 +51,9 @@ test("counts, bar label, and summary", () => {
 })
 
 test("row text", () => {
-  assert.strictEqual(M.queueMeta(queue[0], NOW), "mNOTES could not be reached · 30m ago · tried 4 times")
+  assert.strictEqual(M.queueMeta(queue[0], NOW), "could not be reached · 30m ago · tried 4 times")
   assert.strictEqual(M.queueMeta(queue[1], NOW), "the connection broke part-way · 29m ago")
-  assert.strictEqual(M.queueMeta(queue[2], NOW), "mNOTES refused it (HTTP 401: bad token) · 28m ago")
+  assert.strictEqual(M.queueMeta(queue[2], NOW), "refused (HTTP 401: bad token) · 28m ago")
   assert.strictEqual(M.journalMeta(journal[0], NOW), "saved · sent late · just now")
   assert.strictEqual(M.journalMeta(journal[3], NOW), "already there · 27h ago")
   assert.strictEqual(M.journalMeta(journal[4], NOW), "failed · 3d ago")

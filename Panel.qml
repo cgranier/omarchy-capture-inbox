@@ -137,7 +137,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12), Style.space(600))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -161,7 +161,11 @@ Panel {
 
       Flickable {
         id: panelFlick
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: footer.top
+        anchors.bottomMargin: Style.space(8)
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
@@ -226,18 +230,23 @@ Panel {
               }
             }
           }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: inbox.counts.waiting > 0 ? "enter or r send now · d drop · n note"
-              : inbox.counts.refused > 0 ? "R try refused again · d drop · n note" : "enter open link · n note"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
         }
+      }
+
+      // Stays put while the list scrolls.
+      Text {
+        id: footer
+        textFormat: Text.PlainText
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        horizontalAlignment: Text.AlignHCenter
+        text: inbox.counts.waiting > 0 ? "enter or r save now · d drop · n note"
+          : inbox.counts.refused > 0 ? "R try refused again · d drop · n note" : "enter open link · n note"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
       }
     }
   }

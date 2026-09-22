@@ -1,0 +1,394 @@
+#!/bin/bash
+# capture: save links, notes and screenshots as Markdown files in a folder.
+#
+# Usage:
+#   capture url <url> [note]            a page: title fetched, one .md file
+#   capture note [text]                 a note; first line is the title (no text: opens an editor)
+#   capture shot [--full] [--url <page>] [note]
+#                                       a screenshot via Omarchy's region picker, embedded in a .md file
+#   capture clip [note]                 whatever is on the clipboard: URL, image, or text
+#
+#   capture queue [--json]              captures waiting because the folder was not there (unmounted, say)
+#   capture queue drop <id>             forget one without saving it
+#   capture retry [--quiet] [--refused] save everything waiting, oldest first
+#   capture journal [--json] [-n N]     recent captures and how each one ended
+#   capture reachable                   exit 0 when the folder can be written to
+#   capture setup [folder]              choose the folder (default ~/Documents/Captures) and create it
+#
+# Files land in <folder>/Inbox/YYYY-MM-DD-HHMM-<title>.md with YAML front matter; screenshots in
+# <folder>/Inbox/attachments/. Point an Obsidian or Logseq vault at the folder, or just read them.
+#
+# Config: ~/.config/capture-inbox/config (CAPTURE_FOLDER). Nothing else, no secrets.
+# State:  ~/.local/state/capture-inbox/ (queue, journal). The journal records a link's title and
+#         address, and for notes and screenshots only the kind and outcome.
+set -euo pipefail
+umask 077
+
+USAGE_LINES='2,22p'
+CONFIG="${CAPTURE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/capture-inbox/config}"
+STATE_DIR="${CAPTURE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/capture-inbox}"
+JOURNAL="$STATE_DIR/journal.jsonl"
+QUEUE_DIR="$STATE_DIR/queue"
+DEFAULT_FOLDER="$HOME/Documents/Captures"
+INBOX_SUBDIR="Inbox"
+ATTACH_SUBDIR="Inbox/attachments"
+APP="Capture Inbox"
+
+# ---------- small helpers ----------
+notify() { # glyph headline [description]
+  [[ -n ${CAPTURE_QUIET:-} ]] && return 0
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send --app-name "$APP" -g "$1" "$2" "${3:-}" || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "$APP" "$2" "${3:-}" || true
+  fi
+}
+die() { notify "󰅙" "Capture failed" "$1"; echo "capture: $1" >&2; exit 1; }
+usage() { sed -n "$USAGE_LINES" "$0"; }
+is_url() { [[ $1 =~ ^https?://[^[:space:]]+$ ]]; }
+first_line() { printf '%s' "$1" | tr -d '\r' | sed -n '1p' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+host_of() { local h="${1#*://}"; h="${h%%/*}"; printf '%s' "${h%%:*}"; }
+now_iso() { date -Iseconds; }
+
+# The folder: configured, or the default. Only the default is created without being asked:
+# a configured folder that is missing is most likely a mount that is not there right now.
+load_config() {
+  FOLDER=""
+  # shellcheck disable=SC1090
+  [[ -r $CONFIG ]] && source "$CONFIG"
+  FOLDER="${CAPTURE_FOLDER:-${FOLDER:-}}"
+  FOLDER_IS_DEFAULT=0
+  if [[ -z $FOLDER ]]; then FOLDER="$DEFAULT_FOLDER"; FOLDER_IS_DEFAULT=1; fi
+  FOLDER="${FOLDER%/}"
+  INBOX="$FOLDER/$INBOX_SUBDIR"
+  ATTACH="$FOLDER/$ATTACH_SUBDIR"
+}
+
+folder_ready() { # exit 0 when files can be written there right now
+  load_config
+  if [[ ! -d $FOLDER ]]; then
+    (( FOLDER_IS_DEFAULT )) || return 1
+    mkdir -p "$FOLDER" 2>/dev/null || return 1
+  fi
+  [[ -w $FOLDER ]] || return 1
+  mkdir -p "$INBOX" "$ATTACH" 2>/dev/null || return 1
+  chmod u+rwx "$INBOX" "$ATTACH" 2>/dev/null || true
+  [[ -w $INBOX ]]
+}
+
+# ---------- journal ----------
+state_init() { mkdir -p "$QUEUE_DIR"; }
+queue_ids() { state_init; find "$QUEUE_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort; }
+
+# journal <kind> <status> [label] [url] [queue-id] [detail]
+journal() {
+  state_init
+  jq -cn --arg ts "$(now_iso)" --arg k "$1" --arg s "$2" --arg l "${3:-}" --arg u "${4:-}" --arg id "${5:-}" --arg d "${6:-}" \
+    '{ts:$ts, kind:$k, status:$s}
+     + (if $l != "" then {label:$l[0:160]} else {} end) + (if $u != "" then {url:$u[0:2048]} else {} end)
+     + (if $id != "" then {id:$id} else {} end) + (if $d != "" then {detail:$d[0:160]} else {} end)' >>"$JOURNAL"
+  if (( $(wc -l <"$JOURNAL") > 600 )); then tail -n 500 "$JOURNAL" >"$JOURNAL.tmp" && mv "$JOURNAL.tmp" "$JOURNAL"; fi
+}
+
+# ---------- writing files ----------
+slug() { # text -> filename-safe, short
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-60 | sed 's/-$//'
+}
+yaml_str() { printf '"%s"' "$(printf '%s' "$1" | tr -d '\n\r' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+unique_path() { # dir base ext -> a path that does not exist yet
+  local p="$1/$2.$3" n=2
+  while [[ -e $p ]]; do p="$1/$2-$n.$3"; n=$((n + 1)); done
+  printf '%s' "$p"
+}
+stamp() { date +%Y-%m-%d-%H%M; }
+
+# A page title, best effort, from the first 64 KB. Off when CAPTURE_OFFLINE is set.
+fetch_title() {
+  [[ -n ${CAPTURE_OFFLINE:-} ]] && return 0
+  curl -sL -m 8 -r 0-65535 -A "Mozilla/5.0 (X11; Linux) capture-inbox" -- "$1" 2>/dev/null \
+    | tr '\n\r' '  ' | grep -oiE '<title[^>]*>[^<]{1,300}' | head -1 | sed -E 's/<title[^>]*>//' \
+    | sed 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g; s/&nbsp;/ /g' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+}
+
+# write_item <kind> <label> <url> <mode:data|file> <body> [k=v ...]
+# Return: 0 saved (WROTE_PATH, WROTE_TITLE, WROTE_STATUS=ok|duplicate); 1 the folder is not there; 2 refused.
+write_item() {
+  local kind="$1" label="$2" url="$3" mode="$4" body="$5"; shift 5
+  local -A meta=(); local kv
+  for kv in "$@"; do meta["${kv%%=*}"]="${kv#*=}"; done
+  folder_ready || return 1
+  local ts title path text note="${meta[note]:-}" page="${meta[page]:-}"
+  ts=$(now_iso)
+  case $kind in
+    link)
+      if grep -rlsF "source: $url" "$INBOX" --include='*.md' -q 2>/dev/null; then
+        WROTE_STATUS=duplicate; WROTE_TITLE="$label"; WROTE_PATH=""; return 0
+      fi
+      title="${label:-}"; [[ -z $title || $title == "$url" ]] && title=$(fetch_title "$url")
+      [[ -n $title ]] || title="$(host_of "$url")"
+      path=$(unique_path "$INBOX" "$(stamp)-$(slug "$title")" md)
+      {
+        printf -- '---\ntype: link\ntitle: %s\nsource: %s\ncaptured: %s\nhost: %s\n---\n\n# %s\n\n<%s>\n' \
+          "$(yaml_str "$title")" "$url" "$ts" "$(hostname)" "$title" "$url"
+        [[ -n $note ]] && printf '\n%s\n' "$note"
+      } >"$path" ;;
+    note)
+      [[ $mode == file ]] && text=$(<"$body") || text="$body"
+      [[ -n ${text//[[:space:]]/} ]] || return 2
+      title=$(first_line "$text" | sed 's/^#\+[[:space:]]*//'); [[ -n $title ]] || title="Note"
+      path=$(unique_path "$INBOX" "$(stamp)-$(slug "$title")" md)
+      {
+        printf -- '---\ntype: note\ntitle: %s\ncaptured: %s\nhost: %s\n---\n\n' "$(yaml_str "$title")" "$ts" "$(hostname)"
+        printf '%s\n' "$text"
+      } >"$path" ;;
+    screenshot)
+      [[ $mode == file && -s $body ]] || return 2
+      title="Screenshot"; [[ -n $page ]] && title="Screenshot of $(host_of "$page")"
+      local base img; base="$(stamp)-$(slug "$title")"
+      img=$(unique_path "$ATTACH" "$base" png); cp "$body" "$img"; chmod u+rw "$img"
+      path=$(unique_path "$INBOX" "$base" md)
+      {
+        printf -- '---\ntype: screenshot\ntitle: %s\ncaptured: %s\nhost: %s\n' "$(yaml_str "$title")" "$ts" "$(hostname)"
+        [[ -n $page ]] && printf 'source: %s\n' "$page"
+        printf -- '---\n\n# %s\n\n![%s](attachments/%s)\n' "$title" "$title" "$(basename "$img")"
+        [[ -n $page ]] && printf '\n<%s>\n' "$page"
+        [[ -n $note ]] && printf '\n%s\n' "$note"
+      } >"$path" ;;
+    *) return 2 ;;
+  esac
+  chmod u+rw "$path"
+  WROTE_STATUS=ok; WROTE_TITLE="$title"; WROTE_PATH="$path"
+}
+
+# ---------- queue ----------
+enqueue() { # kind what label url mode body [k=v ...]
+  local kind="$1" what="$2" label="$3" url="$4" mode="$5" body="$6"; shift 6
+  state_init
+  local id dir; id="$(date +%Y%m%d-%H%M%S-%N)"; dir="$QUEUE_DIR/$id"
+  mkdir -p "$dir"
+  if [[ $mode == file ]]; then cp "$body" "$dir/body"; else printf '%s' "$body" >"$dir/body"; fi
+  jq -cn --arg id "$id" --arg ts "$(now_iso)" --arg kind "$kind" --arg what "$what" --arg label "$label" \
+    --arg url "$url" --arg mode "$mode" \
+    '{id:$id, ts:$ts, kind:$kind, what:$what, label:$label, url:$url, mode:$mode, class:"unreachable",
+      attempts:0, dead:false, meta:$ARGS.positional}' --args "$@" >"$dir/request.json"
+  printf '%s\n' "$id"
+}
+
+flush_queue() {
+  FLUSH_SENT=0; FLUSH_LEFT=0; FLUSH_STOP=""
+  state_init
+  exec 9>"$STATE_DIR/lock"; flock -w 60 9 || return 0
+  local id dir req kind label url mode body
+  local -a meta
+  for id in $(queue_ids); do
+    dir="$QUEUE_DIR/$id"; req="$dir/request.json"
+    [[ -r $req && -r $dir/body ]] || { rm -rf "$dir"; continue; }
+    [[ $(jq -r '.dead' "$req") == true ]] && { FLUSH_LEFT=$((FLUSH_LEFT + 1)); continue; }
+    if [[ -n $FLUSH_STOP ]]; then FLUSH_LEFT=$((FLUSH_LEFT + 1)); continue; fi
+    kind=$(jq -r '.kind' "$req"); label=$(jq -r '.label' "$req"); url=$(jq -r '.url' "$req"); mode=$(jq -r '.mode' "$req")
+    mapfile -d '' meta < <(jq -j '.meta[] | ., "\u0000"' "$req")
+    if [[ $mode == file ]]; then body="$dir/body"; else body=$(<"$dir/body"); fi
+    local rc=0; write_item "$kind" "$label" "$url" "$mode" "$body" "${meta[@]}" || rc=$?
+    case $rc in
+      0) journal "$kind" "$WROTE_STATUS" "$( [[ $kind == link ]] && printf '%s' "$WROTE_TITLE" )" "$url" "$id" "sent from the queue"
+         rm -rf "$dir"; FLUSH_SENT=$((FLUSH_SENT + 1)) ;;
+      1) jq '.attempts += 1' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
+         FLUSH_LEFT=$((FLUSH_LEFT + 1)); FLUSH_STOP=unreachable ;;
+      *) jq '.attempts += 1 | .dead = true | .error = "nothing to save"' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
+         journal "$kind" failed "$label" "$url" "$id" "nothing to save"; FLUSH_LEFT=$((FLUSH_LEFT + 1)) ;;
+    esac
+  done
+  flock -u 9
+}
+
+# deliver <kind> <what> <label> <url> <mode> <body> [k=v ...]
+deliver() {
+  local kind="$1" what="$2" label="$3" url="$4" mode="$5" body="$6"; shift 6
+  flush_queue
+  local rc=0; write_item "$kind" "$label" "$url" "$mode" "$body" "$@" || rc=$?
+  case $rc in
+    0)
+      journal "$kind" "$WROTE_STATUS" "$( [[ $kind == link ]] && printf '%s' "$WROTE_TITLE" )" "$url"
+      if [[ $WROTE_STATUS == duplicate ]]; then notify "󰆒" "$what: already saved" "$WROTE_TITLE"
+      else notify "󰃀" "$what saved" "$WROTE_TITLE"; fi
+      jq -cn --arg s "$WROTE_STATUS" --arg t "$WROTE_TITLE" --arg p "$WROTE_PATH" '{status:$s, title:$t, file:$p}' ;;
+    1)
+      local id; id=$(enqueue "$kind" "$what" "$label" "$url" "$mode" "$body" "$@")
+      journal "$kind" queued "$( [[ $kind == link ]] && printf '%s' "$label" )" "$url" "$id" "unreachable"
+      notify "󰃀" "$what saved for later" "The folder is not there right now: $FOLDER"
+      jq -cn --arg id "$id" '{status:"queued", id:$id, reason:"unreachable"}' ;;
+    *) die "nothing to save" ;;
+  esac
+}
+
+# ---------- captures ----------
+capture_url() { # url [note]
+  is_url "$1" || die "not a URL: $1"
+  local -a m=(); [[ -n ${2:-} ]] && m+=("note=$2")
+  deliver link "Link" "$1" "$1" data "" "${m[@]}"
+}
+capture_text() { # text
+  [[ -n ${1//[[:space:]]/} ]] || die "empty note"
+  deliver note "Note" "" "" data "$1"
+}
+capture_image() { # file [note] [page]
+  [[ -s $1 ]] || die "empty screenshot"
+  local -a m=(); [[ -n ${2:-} ]] && m+=("note=$2"); [[ -n ${3:-} ]] && m+=("page=$3")
+  deliver screenshot "Screenshot" "" "${3:-}" file "$1" "${m[@]}"
+}
+
+# take_screenshot <region|full> -> prints the PNG path, or nothing when cancelled.
+take_screenshot() {
+  local mode="$1" tmp; tmp=$(mktemp --suffix=.png)
+  if [[ $mode == full ]]; then
+    local mon; mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused) | .name')
+    grim ${mon:+-o "$mon"} "$tmp" || { rm -f "$tmp"; die "grim failed"; }
+    printf '%s' "$tmp"; return
+  fi
+  if command -v omarchy-capture-region >/dev/null 2>&1; then
+    local no_hw freeze_pid selection
+    no_hw=$(hyprctl getoption cursor:no_hardware_cursors -j 2>/dev/null | jq '.int' 2>/dev/null || echo 0)
+    set_no_hw() { hyprctl eval "hl.config({ cursor = { no_hardware_cursors = $1 } })" &>/dev/null || hyprctl keyword cursor:no_hardware_cursors "$1" &>/dev/null; }
+    set_no_hw 0
+    { read -r freeze_pid; read -r selection; } < <(omarchy-capture-region smart --keep-freeze)
+    [[ -n $selection ]] && { grim -g "$selection" "$tmp" || selection=""; }
+    [[ -n $freeze_pid ]] && kill "$freeze_pid" 2>/dev/null
+    set_no_hw "$no_hw"
+  else
+    local selection; selection=$(slurp 2>/dev/null || true)
+    [[ -n $selection ]] && { grim -g "$selection" "$tmp" || selection=""; }
+  fi
+  if [[ -z $selection ]]; then rm -f "$tmp"; return 0; fi
+  printf '%s' "$tmp"
+}
+
+clipboard_kind() { # url|image|text|empty
+  local types; types=$(wl-paste --list-types 2>/dev/null || true)
+  if grep -q '^image/' <<<"$types"; then printf 'image'; return; fi
+  local text; text=$(wl-paste --no-newline --type text/plain 2>/dev/null || true)
+  [[ -n ${text//[[:space:]]/} ]] || { printf 'empty'; return; }
+  is_url "$(first_line "$text")" && printf 'url' || printf 'text'
+}
+
+# A note typed into a floating terminal; nothing is saved on cancel.
+note_editor() {
+  if [[ -t 0 ]] && command -v gum >/dev/null 2>&1; then
+    gum write --width 84 --height 8 --char-limit 8000 --header "Note (first line is the title)" || return 130
+    return
+  fi
+  exec setsid uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.capture --title="Capture a note" \
+    -e "$0" --prompt-tui
+}
+
+cmd_prompt_tui() {
+  local text; text=$(gum write --width 84 --height 8 --char-limit 8000 --header "Note (first line is the title)") || exit 0
+  [[ -n ${text//[[:space:]]/} ]] || exit 0
+  capture_text "$text"
+}
+
+# ---------- queue and journal commands ----------
+cmd_queue() { # [--json] | drop <id>
+  if [[ ${1:-} == drop ]]; then
+    local id="${2:-}"
+    [[ $id =~ ^[0-9]{8}-[0-9]{6}-[0-9]+$ && -d $QUEUE_DIR/$id ]] || { echo "capture: no such queued capture: $id" >&2; exit 1; }
+    local kind label="" url=""; kind=$(jq -r '.kind' "$QUEUE_DIR/$id/request.json" 2>/dev/null)
+    if [[ $kind == link ]]; then
+      label=$(jq -r '.label // ""' "$QUEUE_DIR/$id/request.json" 2>/dev/null)
+      url=$(jq -r '.url // ""' "$QUEUE_DIR/$id/request.json" 2>/dev/null)
+    fi
+    rm -rf "${QUEUE_DIR:?}/$id"
+    journal "${kind:-unknown}" dropped "$label" "$url" "$id"
+    echo "dropped $id"; return
+  fi
+  local id all="[]"
+  for id in $(queue_ids); do
+    all=$(jq -c --slurpfile r "$QUEUE_DIR/$id/request.json" \
+      '. + [($r[0] | {id, ts, kind, what, label, url, class, attempts, dead, error: (.error // "")})]' <<<"$all")
+  done
+  if [[ ${1:-} == --json ]]; then printf '%s\n' "$all"; return; fi
+  if [[ $all == "[]" ]]; then echo "queue is empty"; return; fi
+  jq -r '.[] | [.id, .kind, (if .dead then "refused: " + .error else .class end), (.label // "")] | @tsv' <<<"$all"
+}
+
+cmd_retry() { # [--quiet] [--refused]
+  local quiet=0 refused=0 arg id req
+  for arg in "$@"; do case $arg in --quiet) quiet=1 ;; --refused) refused=1 ;; esac; done
+  [[ -n $(queue_ids) ]] || { (( quiet )) || echo "queue is empty"; return 0; }
+  if (( refused )); then
+    for id in $(queue_ids); do
+      req=$QUEUE_DIR/$id/request.json
+      [[ $(jq -r '.dead' "$req" 2>/dev/null) == true ]] || continue
+      jq '.dead = false | .error = ""' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
+    done
+  fi
+  flush_queue
+  if (( FLUSH_SENT > 0 )); then
+    notify "󰃀" "$FLUSH_SENT waiting capture$( ((FLUSH_SENT == 1)) || echo s) saved" "$( ((FLUSH_LEFT > 0)) && echo "$FLUSH_LEFT still waiting")"
+  fi
+  jq -cn --argjson s "$FLUSH_SENT" --argjson l "$FLUSH_LEFT" --arg stop "$FLUSH_STOP" '{sent:$s, left:$l, stopped:$stop}'
+}
+
+cmd_journal() { # [--json] [-n N]
+  local json=0 n=30
+  while (($#)); do case $1 in --json) json=1 ;; -n) shift; n=${1:-30} ;; esac; shift; done
+  [[ $n =~ ^[0-9]+$ ]] || n=30
+  [[ -r $JOURNAL ]] || { (( json )) && echo "[]" || echo "no captures recorded yet"; return; }
+  if (( json )); then tail -n "$n" "$JOURNAL" | jq -cs 'reverse'
+  else tail -n "$n" "$JOURNAL" | jq -r '[.ts[0:16], .kind, .status, (.label // .url // "")] | @tsv' | tac; fi
+}
+
+cmd_setup() { # [folder]
+  local folder="${1:-}"
+  mkdir -p "$(dirname "$CONFIG")"
+  if [[ -n $folder ]]; then
+    folder="${folder/#\~/$HOME}"
+    printf 'CAPTURE_FOLDER=%q\n' "${folder%/}" >"$CONFIG"
+  fi
+  load_config
+  mkdir -p "$INBOX" "$ATTACH" || die "cannot create $INBOX"
+  echo "Captures go to $INBOX"
+}
+
+# ---------- flows ----------
+flow_shot() { # mode page note
+  local mode="$1" page="${2:-}" note="${3:-}" file
+  file=$(take_screenshot "$mode"); [[ -n $file ]] || exit 0
+  capture_image "$file" "$note" "$page"; rm -f "$file"
+}
+flow_clip() { # note
+  case $(clipboard_kind) in
+    url) capture_url "$(first_line "$(wl-paste --no-newline --type text/plain)")" "${1:-}" ;;
+    image) local tmp; tmp=$(mktemp --suffix=.png); wl-paste --type image/png >"$tmp" || die "could not read the image"
+           capture_image "$tmp" "${1:-}"; rm -f "$tmp" ;;
+    text) local text; text=$(wl-paste --no-newline --type text/plain)
+          [[ -n ${1:-} ]] && text="$text"$'\n\n'"$1"
+          capture_text "$text" ;;
+    *) die "the clipboard is empty" ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    url) shift; [[ -n ${1:-} ]] || die "url needs a URL"; capture_url "$1" "${2:-}" ;;
+    note) shift
+      if [[ -n ${1:-} ]]; then capture_text "$1"
+      else local text; text=$(note_editor) || exit 0; [[ -n ${text//[[:space:]]/} ]] || exit 0; capture_text "$text"; fi ;;
+    shot) shift; local mode=region page="" note=""
+      while (($#)); do case $1 in --full) mode=full ;; --url) shift; page=${1:-} ;; *) note="$1" ;; esac; shift; done
+      flow_shot "$mode" "$page" "$note" ;;
+    clip) shift; flow_clip "${1:-}" ;;
+    --image-file) shift; local f="$1"; shift; local page="" note=""
+      while (($#)); do case $1 in --url) shift; page=${1:-} ;; *) note="$1" ;; esac; shift; done
+      capture_image "$f" "$note" "$page" ;;
+    --prompt-tui) cmd_prompt_tui ;;
+    queue) shift; cmd_queue "$@" ;;
+    retry) shift; cmd_retry "$@" ;;
+    journal) shift; cmd_journal "$@" ;;
+    reachable) folder_ready ;;
+    setup) shift; cmd_setup "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) if is_url "$1"; then capture_url "$1" "${2:-}"; else die "unknown command: $1 (see --help)"; fi ;;
+  esac
+}
+main "$@"

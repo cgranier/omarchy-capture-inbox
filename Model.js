@@ -53,7 +53,7 @@ function displayName(item) {
   return KIND_NAMES[item && item.kind] || "Capture"
 }
 
-// Queue items from `mnotes-capture queue --json`, oldest first as the CLI lists them.
+// Queue items from `<command> queue --json`, oldest first as the CLI lists them.
 function parseQueue(raw) {
   var list = parseArray(raw)
   var items = []
@@ -70,7 +70,7 @@ function parseQueue(raw) {
   return items
 }
 
-// Journal lines from `mnotes-capture journal --json`, newest first.
+// Journal lines from `<command> journal --json`, newest first.
 function parseJournal(raw) {
   var list = parseArray(raw)
   var rows = []
@@ -105,7 +105,7 @@ function summaryText(c, reachable, hasHistory) {
   if (c.waiting > 0) parts.push(c.waiting + " waiting")
   if (c.refused > 0) parts.push(c.refused + " refused")
   if (parts.length === 0) return hasHistory ? "Everything sent" : "Nothing captured yet"
-  if (c.waiting > 0 && reachable === false) parts.push("mNOTES unreachable")
+  if (c.waiting > 0 && reachable === false) parts.push("not reachable")
   return parts.join(" · ")
 }
 
@@ -121,10 +121,10 @@ function ago(tsMs, nowMs) {
 }
 
 var REASONS = {
-  unreachable: "mNOTES could not be reached",
-  server: "mNOTES answered with an error",
+  unreachable: "could not be reached",
+  server: "answered with an error",
   ambiguous: "the connection broke part-way",
-  refused: "mNOTES refused it"
+  refused: "refused"
 }
 
 function queueMeta(item, nowMs) {

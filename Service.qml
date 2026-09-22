@@ -24,11 +24,19 @@ Item {
   property bool busy: retryProcess.running || noteProcess.running
   property string actionStatus: ""
 
-  readonly property string command: String(setting("command", "mnotes-capture") || "mnotes-capture")
+  // The bundled CLI unless the settings name another one that speaks the same
+  // subcommands (Carlos runs his private mnotes-capture this way).
+  readonly property string bundledCommand: String(Qt.resolvedUrl("bin/capture")).replace(/^file:\/\//, "")
+  readonly property string command: String(setting("command", "") || "") !== "" ? String(setting("command", "")) : bundledCommand
   readonly property bool autoRetry: setting("autoRetry", true) !== false
   readonly property int historyCount: Math.max(3, Math.min(40, parseInt(String(setting("historyCount", 12)), 10) || 12))
-  readonly property string journalPath: (Quickshell.env("MNOTES_STATE")
-    || ((Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/mnotes")) + "/journal.jsonl"
+  // Watched for changes so a capture made from a keybind shows up at once.
+  // The bundled CLI keeps it under capture-inbox; mnotes-capture under mnotes;
+  // anything else says where with the `journal` setting.
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")
+  readonly property string journalPath: String(setting("journal", "") || "") !== "" ? String(setting("journal", ""))
+    : /mnotes-capture$/.test(command) ? stateHome + "/mnotes/journal.jsonl"
+    : stateHome + "/capture-inbox/journal.jsonl"
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -60,7 +68,7 @@ Item {
     actionStatusTimer.restart()
   }
 
-  // withRefused: also try what mNOTES refused. Only ever on request, since a
+  // withRefused: also try what the destination refused. Only ever on request, since a
   // refusal repeats until its cause (a bad token, say) is fixed.
   function retryNow(withRefused) {
     if (retryProcess.running) return
@@ -174,9 +182,9 @@ Item {
     onExited: function(exitCode) {
       var result = {}
       try { result = JSON.parse(String(retryOut.text || "{}").trim().split("\n").pop()) } catch (e) { result = {} }
-      if (result.stopped === "unreachable") { root.reachable = false; root.say("mNOTES is still unreachable") }
+      if (result.stopped === "unreachable") { root.reachable = false; root.say("Still not reachable") }
       else if (result.sent > 0) { root.reachable = true; root.say(result.sent + " sent") }
-      else if (result.left > 0) root.say("mNOTES refused " + result.left)
+      else if (result.left > 0) root.say(result.left + " refused")
       else root.say("")
       root.refresh()
     }

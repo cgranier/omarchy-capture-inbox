@@ -1,96 +1,115 @@
 # Capture Inbox
 
-A bar widget and panel for the `mnotes-capture` CLI on [Omarchy](https://omarchy.org).
+Save links, notes and screenshots as Markdown files with one key, from anywhere on [Omarchy](https://omarchy.org).
+A bar widget shows what you captured, what is still waiting, and takes a quick note.
 
 ![Capture Inbox panel](preview.jpg)
 
-It shows three things:
+## What you get
 
-- **What is waiting.** Captures the CLI saved locally because the webhook could not be reached.
-- **What happened lately.** One row per recent capture: saved, already there, sent late, failed, or dropped.
-- **A quick-note box.** Type, press enter, and the note goes out through the CLI as your own words.
+- **A folder of Markdown files.** `~/Documents/Captures/Inbox/` by default, one file per capture with YAML front
+  matter. Point an Obsidian or Logseq vault at the folder, sync it with Syncthing, or just read the files.
+- **Links** get their page title fetched and become `2026-09-22-1540-page-title.md` with the address and your note.
+  Saving the same link twice is noticed, not duplicated.
+- **Notes** from a quick-note box in the panel, or a floating editor. The first line is the title.
+- **Screenshots** through Omarchy's region picker, saved under `Inbox/attachments/` and embedded in a note.
+- **The clipboard**, whatever is on it: a URL, an image or text goes to the right place.
+- **Never lost.** If the folder is not there (an unmounted disk, a Syncthing share that has not come up), the
+  capture waits in a private queue and is saved when the folder is back. The widget checks once a minute.
+- **A journal** of recent captures: for links the title and address; for notes and screenshots only that one
+  happened. Note text never leaves the file it was saved to.
 
-While something is waiting, the plugin asks the CLI once a minute whether the webhook answers. When it does,
-the queue is sent, oldest first, with no input from you.
+## Install
 
-## What it does not do
-
-The plugin never talks to a webhook, never reads a token, and never stores anything. It only runs these
-commands, and reads what they print:
-
+```bash
+omarchy plugin add https://github.com/cgranier/omarchy-capture-inbox.git --enable
 ```
-mnotes-capture queue --json          mnotes-capture retry [--quiet|--refused]
-mnotes-capture journal --json -n 60  mnotes-capture queue drop <id>
-mnotes-capture reachable             mnotes-capture note <text>
+
+Then give yourself keys. Plugins cannot add keybindings, so add these to `~/.config/hypr/bindings.lua`
+(the paths are where `omarchy plugin add` put the plugin):
+
+```lua
+local capture = os.getenv("HOME") .. "/.config/omarchy/plugins/cgranier.capture/bin/capture"
+o.bind("SUPER + SHIFT + M", "Capture clipboard", capture .. " clip")
+o.bind("SUPER + SHIFT + N", "Capture a note", capture .. " note")
+o.bind("SUPER + CTRL + M", "Capture a screenshot", capture .. " shot")
 ```
 
-The journal holds a title and address for links only. Note text and screenshots never appear in it, so they
-never appear in the panel either: a note shows as "Note".
+Optional menu rows, in `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 
-## Status: personal first
+```jsonc
+"trigger.capture-clip": {"icon":"󰅍","label":"Capture clipboard","action":"~/.config/omarchy/plugins/cgranier.capture/bin/capture clip"},
+"trigger.capture-note": {"icon":"󰏫","label":"Capture a note","action":"~/.config/omarchy/plugins/cgranier.capture/bin/capture note"},
+"trigger.capture-shot": {"icon":"󰹑","label":"Capture a screenshot","action":"~/.config/omarchy/plugins/cgranier.capture/bin/capture shot"}
+```
 
-This version needs the `mnotes-capture` CLI (with the queue and journal commands, 2026-09-21 or later) on the
-shell's `PATH`. That CLI is not public yet, so the plugin is not in the marketplace. The plan for a public
-version is a second backend that writes Markdown to a local folder.
+To use a different folder: `~/.config/omarchy/plugins/cgranier.capture/bin/capture setup ~/Notes/vault`.
+A folder you chose is never created for you: if it is missing, captures wait for it.
 
-## Keys
+Needs `jq`, `curl`, `grim`, `wl-paste` and `gum`, all part of a stock Omarchy.
+
+## Uninstall
+
+```bash
+omarchy plugin remove cgranier.capture
+rm -rf ~/.local/state/capture-inbox    # optional: queue and journal
+rm -rf ~/.config/capture-inbox         # optional: the folder choice
+```
+
+Your captured files stay where they are.
+
+## The panel
 
 | Key | Does |
 |---|---|
 | `j` / `k`, arrows | move |
-| `enter` | on something waiting: send the queue now. On a link in the history: open it |
-| `r` | send the queue now |
-| `R` | also try what mNOTES refused (after fixing the cause, such as a bad token) |
-| `d` | drop the selected waiting capture without sending it |
+| `enter` | on something waiting: save the queue now. On a link in the history: open it |
+| `r` | save the queue now |
+| `R` | also retry what was refused |
+| `d` | drop the selected waiting capture without saving it |
 | `n` | jump to the quick-note box (`esc` leaves it) |
-| middle click on the bar icon | send the queue now |
+| middle click on the bar icon | save the queue now |
 
-## The bar
+The bar shows a dimmed inbox glyph when there is nothing to do, and a clock with a count while captures wait.
 
-A dimmed inbox glyph when there is nothing to do. A clock and a count when captures are waiting. The count
-is highlighted when mNOTES refused something, because that needs a person: a refusal repeats until its cause
-is fixed, so refused captures are never retried automatically.
-
-## Settings
+## The CLI
 
 ```
-omarchy bar set cgranier.capture autoRetry false     # never send without being asked
-omarchy bar set cgranier.capture historyCount 20     # rows of history (3 to 40)
-omarchy bar set cgranier.capture command /path/to/cli
+capture url <url> [note]      capture note [text]       capture shot [--full] [--url <page>] [note]
+capture clip [note]           capture queue [--json]    capture retry [--quiet] [--refused]
+capture journal [--json]      capture reachable         capture setup [folder]
 ```
 
-## From a keybind or script
+A saved capture prints `{"status":"ok","title":…,"file":…}`; one that had to wait prints
+`{"status":"queued","id":…}` and exits 0.
+
+## Bring your own backend
+
+The widget only ever runs a CLI with those subcommands and reads what it prints. Point `command` at another
+program that speaks them (a webhook client, say) and the panel works unchanged:
 
 ```
-omarchy-shell cgranier.capture toggle
-omarchy-shell cgranier.capture status         # "2 waiting · mNOTES unreachable"
-omarchy-shell cgranier.capture state          # JSON
-omarchy-shell cgranier.capture retry
-omarchy-shell cgranier.capture retryRefused
+omarchy bar set cgranier.capture command /path/to/your-cli
+omarchy bar set cgranier.capture journal /path/to/its/journal.jsonl   # if it keeps one elsewhere
 ```
 
-## Install
+Other settings: `autoRetry` (default on) and `historyCount` (default 12).
+
+## Development
 
 ```
-omarchy plugin add <this repo> --enable
+bin/capture        the CLI: folder backend, queue, journal
+Panel.qml          bar button + popup (entry point)
+Service.qml        runs the CLI, watches the journal
+Model.js           pure logic: rows, labels, counts
+tests/             node tests for the model, bash tests for the CLI (against a temp folder)
 ```
 
-## Uninstall
-
-```
-omarchy plugin disable cgranier.capture
-omarchy plugin remove cgranier.capture
-```
-
-The queue and journal belong to the CLI (`~/.local/state/mnotes/`) and are left alone.
-
-## Tests
-
-```
+```bash
 node tests/model.test.js
+bash tests/capture.test.sh
+omarchy plugin validate .
 ```
-
-The CLI has its own suite, run against a fake webhook on localhost. Never test against the real one.
 
 ## License
 
