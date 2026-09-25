@@ -30,13 +30,6 @@ Item {
   readonly property string command: String(setting("command", "") || "") !== "" ? String(setting("command", "")) : bundledCommand
   readonly property bool autoRetry: setting("autoRetry", true) !== false
   readonly property int historyCount: Math.max(3, Math.min(40, parseInt(String(setting("historyCount", 12)), 10) || 12))
-  // Watched for changes so a capture made from a keybind shows up at once.
-  // The bundled CLI keeps it under capture-inbox; mnotes-capture under mnotes;
-  // anything else says where with the `journal` setting.
-  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")
-  readonly property string journalPath: String(setting("journal", "") || "") !== "" ? String(setting("journal", ""))
-    : /mnotes-capture$/.test(command) ? stateHome + "/mnotes/journal.jsonl"
-    : stateHome + "/capture-inbox/journal.jsonl"
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -75,7 +68,7 @@ Item {
     if (counts.waiting === 0 && !(withRefused && counts.refused > 0)) return
     say("Sending…")
     // Titles are fetched on save, so a long queue can take a while; still finite.
-    retryProcess.command = ["timeout", "300", command].concat(withRefused ? ["retry", "--refused"] : ["retry"])
+    retryProcess.command = ["timeout", "300", "sh", "-c", '"$@" | head -c 200000', "sh", command].concat(withRefused ? ["retry", "--refused"] : ["retry"])
     retryProcess.running = true
   }
 
@@ -91,7 +84,7 @@ Item {
     var note = String(text || "").trim()
     if (note === "" || noteProcess.running) return false
     say("Saving note…")
-    noteProcess.command = ["timeout", "60", command, "note", note]
+    noteProcess.command = ["timeout", "60", "sh", "-c", '"$@" | head -c 200000', "sh", command, "note", note]
     noteProcess.running = true
     return true
   }
@@ -103,14 +96,14 @@ Item {
   onSettingsChanged: refresh()
   Component.onCompleted: refresh()
 
-  // The CLI writes a journal line for every attempt, send, and drop, so the
-  // journal changing is the signal that the queue may have changed too.
-  FileView {
-    path: root.journalPath
-    watchChanges: true
-    printErrors: false
-    onFileChanged: { reload(); root.refresh() }
-    onLoaded: root.refresh()
+  // The shell never opens the journal itself. The bundled CLI pokes this
+  // widget over IPC after every capture, and a slow poll covers a CLI that
+  // does not.
+  Timer {
+    interval: 30000
+    repeat: true
+    running: true
+    onTriggered: root.refresh()
   }
 
   // While something waits: is the webhook back? `reachable` is a plain GET
@@ -140,7 +133,7 @@ Item {
   Process {
     id: queueProcess
     running: false
-    command: ["timeout", "15", root.command, "queue", "--json"]
+    command: ["timeout", "15", "sh", "-c", '"$@" | head -c 2000000', "sh", root.command, "queue", "--json"]
     stdout: StdioCollector { id: queueOut; waitForEnd: true }
     onExited: function(exitCode) {
       root.queue = Model.parseQueue(queueOut.text)
@@ -152,7 +145,7 @@ Item {
   Process {
     id: journalProcess
     running: false
-    command: ["timeout", "15", root.command, "journal", "--json", "-n", "60"]
+    command: ["timeout", "15", "sh", "-c", '"$@" | head -c 2000000', "sh", root.command, "journal", "--json", "-n", "60"]
     stdout: StdioCollector { id: journalOut; waitForEnd: true }
     onExited: function(exitCode) {
       root.journal = Model.parseJournal(journalOut.text)
@@ -169,7 +162,7 @@ Item {
       root.reachable = exitCode === 0
       root.rebuild()
       if (root.reachable && root.counts.waiting > 0 && !retryProcess.running) {
-        retryProcess.command = ["timeout", "300", root.command, "retry", "--quiet"]
+        retryProcess.command = ["timeout", "300", "sh", "-c", '"$@" | head -c 200000', "sh", root.command, "retry", "--quiet"]
         retryProcess.running = true
       }
     }

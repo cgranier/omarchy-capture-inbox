@@ -85,12 +85,13 @@ A saved capture prints `{"status":"ok","title":…,"file":…}`; one that had to
 
 ## Bring your own backend
 
-The widget only ever runs a CLI with those subcommands and reads what it prints. Point `command` at another
+The widget only ever runs a CLI with those subcommands and reads what it prints (capped in size). It never opens
+the journal or queue files itself; a CLI can run `omarchy-shell -q cgranier.capture refresh` after a capture so
+the panel updates at once, and the widget polls every 30 s regardless. Point `command` at another
 program that speaks them (a webhook client, say) and the panel works unchanged:
 
 ```
 omarchy bar set cgranier.capture command /path/to/your-cli
-omarchy bar set cgranier.capture journal /path/to/its/journal.jsonl   # if it keeps one elsewhere
 ```
 
 Other settings: `autoRetry` (default on) and `historyCount` (default 12).

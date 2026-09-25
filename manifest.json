@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cgranier.capture",
   "name": "Capture Inbox",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Carlos Granier",
   "license": "MIT",
   "description": "Save links, notes and screenshots as Markdown files with one key, and see what you captured, what is still waiting, and a box for a quick note.",
@@ -21,13 +21,11 @@
     "defaultSection": "right",
     "defaults": {
       "command": "",
-      "journal": "",
       "autoRetry": true,
       "historyCount": 12
     },
     "schema": [
       { "key": "command", "type": "string", "label": "Capture command", "defaultValue": "", "description": "Empty uses the bundled capture CLI (Markdown files in a folder). Name another CLI with the same subcommands to use that instead." },
-      { "key": "journal", "type": "string", "label": "Journal file to watch", "defaultValue": "", "description": "Only needed with a custom command whose journal is somewhere else." },
       { "key": "autoRetry", "type": "boolean", "label": "Send waiting captures automatically", "defaultValue": true, "description": "While something is waiting, check once a minute whether the webhook answers, and send the queue when it does." },
       { "key": "historyCount", "type": "integer", "label": "Recent captures shown", "min": 3, "max": 40, "step": 1, "defaultValue": 12 }
     ]

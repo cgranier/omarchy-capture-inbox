@@ -88,6 +88,8 @@ journal() {
      + (if $l != "" then {label:$l[0:160]} else {} end) + (if $u != "" then {url:$u[0:2048]} else {} end)
      + (if $id != "" then {id:$id} else {} end) + (if $d != "" then {detail:$d[0:160]} else {} end)' >>"$JOURNAL"
   if (( $(wc -l <"$JOURNAL") > 600 )); then tail -n 500 "$JOURNAL" >"$JOURNAL.tmp" && mv "$JOURNAL.tmp" "$JOURNAL"; fi
+  # Tell the bar widget, if there is one; it never waits on this.
+  command -v omarchy-shell >/dev/null 2>&1 && (timeout 3 omarchy-shell -q cgranier.capture refresh >/dev/null 2>&1 &)
 }
 
 # ---------- writing files ----------
