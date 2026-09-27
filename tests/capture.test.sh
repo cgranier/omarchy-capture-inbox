@@ -90,4 +90,25 @@ out=$(CAPTURE_OFFLINE= run url "http://127.0.0.1:28766/x")
 check "title fetched and entities decoded" '[[ $(jq -r .title <<<"$out") == "Hello & Welcome" ]]'
 kill "$(cat "$T/srv.pid")" 2>/dev/null
 
+
+# --- planted entries in the Inbox are never opened
+IN=$(dirname "$(run note "locate the inbox" | jq -r .file)"); stamp=$(date +%Y-%m-%d-%H%M)
+ln -sf "$T/victim-new" "$IN/$stamp-planted.md"
+printf 'untouched\n' >"$T/victim-old"; ln -sf "$T/victim-old" "$IN/$stamp-planted-2.md"
+out=$(printf 'planted\nbody' | run note -); f=$(jq -r .file <<<"$out")
+check "a dangling symlink at the chosen name is skipped, not followed" '[[ ! -e $T/victim-new && $(basename "$f") == "$stamp-planted-3.md" && -f $f && ! -L $f ]]'
+check "a symlink to an existing file is skipped and its target untouched" '[[ $(cat "$T/victim-old") == untouched ]]'
+rm -f "$IN/$stamp-planted.md" "$IN/$stamp-planted-2.md"
+
+# --- note text over stdin
+out=$(printf 'From stdin\n\nsecret-ish words' | run note -)
+check "note -: text read from stdin" 'f=$(jq -r .file <<<"$out"); grep -q "^title: \"From stdin\"$" "$f" && grep -q "^secret-ish words$" "$f"'
+check "note -: empty stdin is refused" '! printf "  " | run note - 2>/dev/null'
+
+# --- an Inbox that is a symlink is refused, nothing written through it
+mv "$IN" "$T/real-inbox"; mkdir -p "$T/elsewhere/attachments"; ln -s "$T/elsewhere" "$IN"
+printf 'through the link' | run note - >/dev/null 2>&1; rc=$?
+check "Inbox replaced by a symlink: refused, nothing written there" '[[ $rc != 0 && -z $(ls "$T/elsewhere" | grep "\.md$") ]]'
+rm "$IN"; mv "$T/real-inbox" "$IN"
+
 echo; echo "$pass passed, $fail failed"; (( fail == 0 ))

@@ -3,7 +3,8 @@
 #
 # Usage:
 #   capture url <url> [note]            a page: title fetched, one .md file
-#   capture note [text]                 a note; first line is the title (no text: opens an editor)
+#   capture note [text | -]             a note; first line is the title (no text: opens an editor;
+#                                       -: read it from stdin, so it never shows in the process list)
 #   capture shot [--full] [--url <page>] [note]
 #                                       a screenshot via Omarchy's region picker, embedded in a .md file
 #   capture clip [note]                 whatever is on the clipboard: URL, image, or text
@@ -83,8 +84,11 @@ queue_ids() { state_init; find "$QUEUE_DIR" -mindepth 1 -maxdepth 1 -type d -pri
 # journal <kind> <status> [label] [url] [queue-id] [detail]
 journal() {
   state_init
-  jq -cn --arg ts "$(now_iso)" --arg k "$1" --arg s "$2" --arg l "${3:-}" --arg u "${4:-}" --arg id "${5:-}" --arg d "${6:-}" \
-    '{ts:$ts, kind:$k, status:$s}
+  # Values travel in the environment, which only this user can read, not in
+  # jq's arguments, which every local user can see in /proc.
+  J_TS="$(now_iso)" J_K="$1" J_S="$2" J_L="${3:-}" J_U="${4:-}" J_ID="${5:-}" J_D="${6:-}" jq -cn \
+    '(env.J_L) as $l | (env.J_U) as $u | (env.J_ID) as $id | (env.J_D) as $d
+     | {ts:env.J_TS, kind:env.J_K, status:env.J_S}
      + (if $l != "" then {label:$l[0:160]} else {} end) + (if $u != "" then {url:$u[0:2048]} else {} end)
      + (if $id != "" then {id:$id} else {} end) + (if $d != "" then {detail:$d[0:160]} else {} end)' >>"$JOURNAL"
   if (( $(wc -l <"$JOURNAL") > 600 )); then tail -n 500 "$JOURNAL" >"$JOURNAL.tmp" && mv "$JOURNAL.tmp" "$JOURNAL"; fi
@@ -97,11 +101,43 @@ slug() { # text -> filename-safe, short
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-60 | sed 's/-$//'
 }
 yaml_str() { printf '"%s"' "$(printf '%s' "$1" | tr -d '\n\r' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
-unique_path() { # dir base ext -> a path that does not exist yet
-  local p="$1/$2.$3" n=2
-  while [[ -e $p ]]; do p="$1/$2-$n.$3"; n=$((n + 1)); done
-  printf '%s' "$p"
-}
+# place_file <dir> <base> <ext> <max-bytes>: stdin -> a new file, prints its path.
+# The directory is opened once (a symlink there is refused) and the file is
+# created relative to it with O_CREAT|O_EXCL|O_NOFOLLOW, so an existing
+# entry of any kind, a dangling symlink included, is never opened: the next
+# free name is taken instead. The descriptor it created is the one written.
+PLACE_PY='
+import os, sys
+d, base, ext, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+if "/" in base or base in ("", ".", ".."):
+    sys.exit(3)
+try:
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+except OSError:
+    sys.exit(3)
+if os.fstat(dfd).st_uid != os.getuid():
+    sys.exit(3)
+data = sys.stdin.buffer.read(limit + 1)
+if len(data) > limit:
+    sys.exit(4)
+for n in range(1, 1000):
+    name = f"{base}.{ext}" if n == 1 else f"{base}-{n}.{ext}"
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+    except FileExistsError:
+        continue
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    sys.stdout.write(os.path.join(d, name))
+    sys.exit(0)
+sys.exit(5)
+'
+place_file() { python3 -c "$PLACE_PY" "$@"; }
+MAX_NOTE_BYTES=1000000
+UNSAFE_FOLDER="not written: the Inbox is not a plain folder of yours (a symlink, or owned by someone else)"
+MAX_IMAGE_BYTES=64000000
 stamp() { date +%Y-%m-%d-%H%M; }
 
 # A page title, best effort, from the first 64 KB. Off when CAPTURE_OFFLINE is set.
@@ -114,7 +150,8 @@ fetch_title() {
 }
 
 # write_item <kind> <label> <url> <mode:data|file> <body> [k=v ...]
-# Return: 0 saved (WROTE_PATH, WROTE_TITLE, WROTE_STATUS=ok|duplicate); 1 the folder is not there; 2 refused.
+# Return: 0 saved (WROTE_PATH, WROTE_TITLE, WROTE_STATUS=ok|duplicate); 1 the folder is not there; 2 refused;
+# 3 not written because the Inbox or attachments folder is not a plain folder of this user's.
 write_item() {
   local kind="$1" label="$2" url="$3" mode="$4" body="$5"; shift 5
   local -A meta=(); local kv
@@ -129,37 +166,33 @@ write_item() {
       fi
       title="${label:-}"; [[ -z $title || $title == "$url" ]] && title=$(fetch_title "$url")
       [[ -n $title ]] || title="$(host_of "$url")"
-      path=$(unique_path "$INBOX" "$(stamp)-$(slug "$title")" md)
-      {
+      path=$({
         printf -- '---\ntype: link\ntitle: %s\nsource: %s\ncaptured: %s\nhost: %s\n---\n\n# %s\n\n<%s>\n' \
           "$(yaml_str "$title")" "$url" "$ts" "$(hostname)" "$title" "$url"
-        [[ -n $note ]] && printf '\n%s\n' "$note"
-      } >"$path" ;;
+        if [[ -n $note ]]; then printf '\n%s\n' "$note"; fi
+      } | place_file "$INBOX" "$(stamp)-$(slug "$title")" md "$MAX_NOTE_BYTES") || return 3 ;;
     note)
       [[ $mode == file ]] && text=$(<"$body") || text="$body"
       [[ -n ${text//[[:space:]]/} ]] || return 2
       title=$(first_line "$text" | sed 's/^#\+[[:space:]]*//'); [[ -n $title ]] || title="Note"
-      path=$(unique_path "$INBOX" "$(stamp)-$(slug "$title")" md)
-      {
+      path=$({
         printf -- '---\ntype: note\ntitle: %s\ncaptured: %s\nhost: %s\n---\n\n' "$(yaml_str "$title")" "$ts" "$(hostname)"
         printf '%s\n' "$text"
-      } >"$path" ;;
+      } | place_file "$INBOX" "$(stamp)-$(slug "$title")" md "$MAX_NOTE_BYTES") || return 3 ;;
     screenshot)
       [[ $mode == file && -s $body ]] || return 2
       title="Screenshot"; [[ -n $page ]] && title="Screenshot of $(host_of "$page")"
       local base img; base="$(stamp)-$(slug "$title")"
-      img=$(unique_path "$ATTACH" "$base" png); cp "$body" "$img"; chmod u+rw "$img"
-      path=$(unique_path "$INBOX" "$base" md)
-      {
+      img=$(place_file "$ATTACH" "$base" png "$MAX_IMAGE_BYTES" <"$body") || return 3
+      path=$({
         printf -- '---\ntype: screenshot\ntitle: %s\ncaptured: %s\nhost: %s\n' "$(yaml_str "$title")" "$ts" "$(hostname)"
-        [[ -n $page ]] && printf 'source: %s\n' "$page"
+        if [[ -n $page ]]; then printf 'source: %s\n' "$page"; fi
         printf -- '---\n\n# %s\n\n![%s](attachments/%s)\n' "$title" "$title" "$(basename "$img")"
-        [[ -n $page ]] && printf '\n<%s>\n' "$page"
-        [[ -n $note ]] && printf '\n%s\n' "$note"
-      } >"$path" ;;
+        if [[ -n $page ]]; then printf '\n<%s>\n' "$page"; fi
+        if [[ -n $note ]]; then printf '\n%s\n' "$note"; fi
+      } | place_file "$INBOX" "$base" md "$MAX_NOTE_BYTES") || return 3 ;;
     *) return 2 ;;
   esac
-  chmod u+rw "$path"
   WROTE_STATUS=ok; WROTE_TITLE="$title"; WROTE_PATH="$path"
 }
 
@@ -170,10 +203,12 @@ enqueue() { # kind what label url mode body [k=v ...]
   local id dir; id="$(date +%Y%m%d-%H%M%S-%N)"; dir="$QUEUE_DIR/$id"
   mkdir -p "$dir"
   if [[ $mode == file ]]; then cp "$body" "$dir/body"; else printf '%s' "$body" >"$dir/body"; fi
-  jq -cn --arg id "$id" --arg ts "$(now_iso)" --arg kind "$kind" --arg what "$what" --arg label "$label" \
-    --arg url "$url" --arg mode "$mode" \
-    '{id:$id, ts:$ts, kind:$kind, what:$what, label:$label, url:$url, mode:$mode, class:"unreachable",
-      attempts:0, dead:false, meta:$ARGS.positional}' --args "$@" >"$dir/request.json"
+  # A queued note's text rides in meta: stdin and the environment, never jq's arguments.
+  { (( $# )) && printf '%s\0' "$@"; true; } \
+    | Q_ID="$id" Q_TS="$(now_iso)" Q_KIND="$kind" Q_WHAT="$what" Q_LABEL="$label" Q_URL="$url" Q_MODE="$mode" \
+      jq -cRs '{id:env.Q_ID, ts:env.Q_TS, kind:env.Q_KIND, what:env.Q_WHAT, label:env.Q_LABEL, url:env.Q_URL,
+        mode:env.Q_MODE, class:"unreachable", attempts:0, dead:false,
+        meta:(split("\u0000") | if length > 0 then .[:-1] else . end)}' >"$dir/request.json"
   printf '%s\n' "$id"
 }
 
@@ -197,8 +232,9 @@ flush_queue() {
          rm -rf "$dir"; FLUSH_SENT=$((FLUSH_SENT + 1)) ;;
       1) jq '.attempts += 1' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
          FLUSH_LEFT=$((FLUSH_LEFT + 1)); FLUSH_STOP=unreachable ;;
-      *) jq '.attempts += 1 | .dead = true | .error = "nothing to save"' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
-         journal "$kind" failed "$label" "$url" "$id" "nothing to save"; FLUSH_LEFT=$((FLUSH_LEFT + 1)) ;;
+      *) local why="nothing to save"; (( rc == 3 )) && why="$UNSAFE_FOLDER"
+         E_WHY="$why" jq '.attempts += 1 | .dead = true | .error = env.E_WHY' "$req" >"$req.tmp" && mv "$req.tmp" "$req"
+         journal "$kind" failed "$label" "$url" "$id" "$why"; FLUSH_LEFT=$((FLUSH_LEFT + 1)) ;;
     esac
   done
   flock -u 9
@@ -212,14 +248,17 @@ deliver() {
   case $rc in
     0)
       journal "$kind" "$WROTE_STATUS" "$( [[ $kind == link ]] && printf '%s' "$WROTE_TITLE" )" "$url"
-      if [[ $WROTE_STATUS == duplicate ]]; then notify "󰆒" "$what: already saved" "$WROTE_TITLE"
-      else notify "󰃀" "$what saved" "$WROTE_TITLE"; fi
-      jq -cn --arg s "$WROTE_STATUS" --arg t "$WROTE_TITLE" --arg p "$WROTE_PATH" '{status:$s, title:$t, file:$p}' ;;
+      # A note's title is its first line, so it stays out of the notification's arguments.
+      local shown="$WROTE_TITLE"; [[ $kind == note ]] && shown=""
+      if [[ $WROTE_STATUS == duplicate ]]; then notify "󰆒" "$what: already saved" "$shown"
+      else notify "󰃀" "$what saved" "$shown"; fi
+      R_S="$WROTE_STATUS" R_T="$WROTE_TITLE" R_P="$WROTE_PATH" jq -cn '{status:env.R_S, title:env.R_T, file:env.R_P}' ;;
     1)
       local id; id=$(enqueue "$kind" "$what" "$label" "$url" "$mode" "$body" "$@")
       journal "$kind" queued "$( [[ $kind == link ]] && printf '%s' "$label" )" "$url" "$id" "unreachable"
       notify "󰃀" "$what saved for later" "The folder is not there right now: $FOLDER"
       jq -cn --arg id "$id" '{status:"queued", id:$id, reason:"unreachable"}' ;;
+    3) die "$UNSAFE_FOLDER" ;;
     *) die "nothing to save" ;;
   esac
 }
@@ -374,7 +413,9 @@ main() {
   case "${1:-}" in
     url) shift; [[ -n ${1:-} ]] || die "url needs a URL"; capture_url "$1" "${2:-}" ;;
     note) shift
-      if [[ -n ${1:-} ]]; then capture_text "$1"
+      if [[ ${1:-} == - ]]; then
+        local text; text=$(head -c "$MAX_NOTE_BYTES"); [[ -n ${text//[[:space:]]/} ]] || die "empty note"; capture_text "$text"
+      elif [[ -n ${1:-} ]]; then capture_text "$1"
       else local text; text=$(note_editor) || exit 0; [[ -n ${text//[[:space:]]/} ]] || exit 0; capture_text "$text"; fi ;;
     shot) shift; local mode=region page="" note=""
       while (($#)); do case $1 in --full) mode=full ;; --url) shift; page=${1:-} ;; *) note="$1" ;; esac; shift; done

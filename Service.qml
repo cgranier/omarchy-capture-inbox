@@ -84,7 +84,11 @@ Item {
     var note = String(text || "").trim()
     if (note === "" || noteProcess.running) return false
     say("Saving note…")
-    noteProcess.command = ["timeout", "60", "sh", "-c", '"$@" | head -c 200000', "sh", command, "note", note]
+    // The text goes over stdin (`note -`), never as an argument: other local
+    // users can read a running process's arguments in /proc.
+    noteProcess.payload = note
+    noteProcess.command = ["timeout", "60", "sh", "-c", '"$@" | head -c 200000', "sh", command, "note", "-"]
+    noteProcess.stdinEnabled = true
     noteProcess.running = true
     return true
   }
@@ -193,8 +197,11 @@ Item {
 
   Process {
     id: noteProcess
+    property string payload: ""
     running: false
     command: []
+    stdinEnabled: true
+    onStarted: { write(payload); payload = ""; stdinEnabled = false }
     stdout: StdioCollector { id: noteOut; waitForEnd: true }
     onExited: function(exitCode) {
       var status = ""

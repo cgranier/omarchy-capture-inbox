@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cgranier.capture",
   "name": "Capture Inbox",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": "Carlos Granier",
   "license": "MIT",
   "description": "Save links, notes and screenshots as Markdown files with one key, and see what you captured, what is still waiting, and a box for a quick note.",

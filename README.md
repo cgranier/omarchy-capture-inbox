@@ -17,7 +17,11 @@ A bar widget shows what you captured, what is still waiting, and takes a quick n
 - **Never lost.** If the folder is not there (an unmounted disk, a Syncthing share that has not come up), the
   capture waits in a private queue and is saved when the folder is back. The widget checks once a minute.
 - **A journal** of recent captures: for links the title and address; for notes and screenshots only that one
-  happened. Note text never leaves the file it was saved to.
+  happened. Note text never leaves the file it was saved to, and never travels in a command's arguments (which any
+  local user can read in `/proc`): the panel hands it over with `capture note -` on stdin.
+- **Files are created, never overwritten.** Each one is created with an exclusive open inside the Inbox folder it
+  holds open, so a name that is already taken, even by a symlink pointing elsewhere, is skipped for the next free
+  one. An Inbox that is itself a symlink or not yours is refused.
 
 ## Install
 
@@ -75,7 +79,7 @@ The bar shows a dimmed inbox glyph when there is nothing to do, and a clock with
 ## The CLI
 
 ```
-capture url <url> [note]      capture note [text]       capture shot [--full] [--url <page>] [note]
+capture url <url> [note]      capture note [text | -]   capture shot [--full] [--url <page>] [note]
 capture clip [note]           capture queue [--json]    capture retry [--quiet] [--refused]
 capture journal [--json]      capture reachable         capture setup [folder]
 ```
